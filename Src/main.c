@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include "math.h"
 #include "arm_math.h"
+#include "stdbool.h"
 
 /* USER CODE END Includes */
 
@@ -79,19 +80,26 @@ static void MX_TIM11_Init(void);
 //uint32_t var;
 
 
-#define BUFFER_ADC_SIZE 4000  // 2.5us ADC for 10ms
+#define BUFFER_ADC_SIZE 600  // 2.5us ADC for 10ms
 //#define PI 3.1415926
 #define NUM_SAMPLES 100
 #define WINDOW_SIZE 500
+#define FLAG_POSITION  (1 << 0) // Assuming flag is at bit 0
 
-uint32_t sine_val[NUM_SAMPLES];
-uint32_t sine_val_five[500];
+
+float32_t sine_val[NUM_SAMPLES];
+float32_t sine_val_five[500];
 uint32_t BUFFER_ADC[BUFFER_ADC_SIZE];
+uint32_t BUFFER_ADC2[BUFFER_ADC_SIZE];
 uint32_t TIMER8_VALUE;
 uint32_t adc_value;
 //float32_t hann_window[WINDOW_SIZE];
-uint32_t hanning[WINDOW_SIZE];
+float32_t hanning[WINDOW_SIZE];
 uint32_t after_hanning[WINDOW_SIZE];
+
+uint32_t sine_val_test[NUM_SAMPLES];
+uint32_t sine_val_five_test[500];
+uint32_t flag=0;
 
 
 void get_sineval()
@@ -100,22 +108,38 @@ void get_sineval()
    {
 	    for (int i=0;i<NUM_SAMPLES;i++)
 	    {
-	    	sine_val[i] = ((sin(i*2*PI/NUM_SAMPLES)+1)*(4096/2));
+	    	sine_val[i] = ((sin(i*2*PI/NUM_SAMPLES-PI/2)+1)*(4096/2));
 
 	    	sine_val_five[j*100+i]=sine_val[i];
+	    	sine_val_five_test[j*100+i]=(uint32_t)(sine_val_five[j*100+i]);
 	    }
 
 
    }
 }
+/*
+void get_sineval_test()
+{
+   for (int j=0;j<5;j++)
+   {
+	    for (int i=0;i<NUM_SAMPLES;i++)
+	    {
+	    	sine_val_test[i] = ((sin(i*2*PI/NUM_SAMPLES-PI/2)+1)*(4096/2));
 
+	    	sine_val_five_test[j*100+i]=sine_val[i];
+	    }
+
+
+   }
+}
+*/
 void applyHanningWindow()
 {
     for(int i = 0; i < WINDOW_SIZE; i++)
     {
         hanning[i] = 0.5 * (1 - cos(2 * PI * i / (WINDOW_SIZE - 1)));
 
-        after_hanning[i]=sine_val_five[i]* hanning[i];
+        after_hanning[i]=(uint32_t)(sine_val_five[i]* hanning[i]);
     }
 }
 
@@ -141,8 +165,10 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
 	if(hadc->Instance == ADC1)
 	{
-		HAL_UART_Transmit_DMA(&huart1, (uint8_t*)BUFFER_ADC, sizeof(BUFFER_ADC_SIZE));
-		//SendBufferOverUART(BUFFER_ADC, BUFFER_ADC_SIZE);
+		adc_value = BUFFER_ADC[1];
+		//HAL_UART_Transmit_DMA(&huart1, (uint8_t*)BUFFER_ADC, sizeof(BUFFER_ADC_SIZE));
+	    // SendBufferOverUART(BUFFER_ADC, BUFFER_ADC_SIZE);
+	    // HAL_Delay(10);
 	}
 	//htim8.Instance->CNT=0;
 	//adc_value = BUFFER_ADC[1];
@@ -166,15 +192,17 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
    if (htim->Instance == TIM11)
    {
         /* Timer 6 period elapsed */
-    	HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5); // To show the status by LED
+    	//HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5); // To show the status by LED
+    	// Set the flag
+    	flag = 1; // Set the corresponding bit to 1
+    	//HAL_TIM_Base_Start_IT(&htim7);  // DAC Timer
+      // HAL_TIM_Base_Start_IT(&htim8);  //ADC Timer
 
-    	HAL_TIM_Base_Start_IT(&htim7);  // DAC Timer
-        HAL_TIM_Base_Start_IT(&htim8);  //ADC Timer
 
-
-    	HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, sine_val_five, 500, DAC_ALIGN_12B_R); // start in DMA for DAC
+    	//HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, after_hanning, 500, DAC_ALIGN_12B_R);
     	//HAL_Delay(10);
-    	HAL_ADC_Start_DMA(&hadc1, BUFFER_ADC, BUFFER_ADC_SIZE); // start in DMA and we are reading only 1 channel or 1 word
+        HAL_ADC_Start_DMA(&hadc1, BUFFER_ADC, BUFFER_ADC_SIZE); // start in DMA and we are reading only 1 channel or 1 word
+        //HAL_ADC_Start_DMA(&hadc2, BUFFER_ADC2, BUFFER_ADC_SIZE); // start in DMA and we are reading only 1 channel or 1 word
       //  HAL_ADC_ConvCpltCallback();
       // HAL_ADC_ConvHalfColtCallback();
     	/* Your code here */
@@ -224,8 +252,11 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   get_sineval();  // To get the 5-cycle sine wave
+ // get_sineval_test();
   applyHanningWindow() ;
   HAL_TIM_Base_Start_IT(&htim11);  // To start Timer6 which is 100ms
+  HAL_TIM_Base_Start_IT(&htim7);
+  HAL_TIM_Base_Start_IT(&htim8);  //ADC Timer
 
  // arm_hanning_f32(hann_window, WINDOW_SIZE);
 
@@ -238,8 +269,25 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+	//  SendBufferOverUART();
+	 // HAL_Delay(5);
+	  if (flag==1)
+		{
+	      // Flag is set
+	      // Do something...
+	  // Clear the flag
+	  flag = 0; // Clear the corresponding bit to 0
+	  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
 	 // HAL_TIM_Base_Start_IT(&htim7);
-	 // HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, hanning, 500, DAC_ALIGN_12B_R);
+	  HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, after_hanning, 500, DAC_ALIGN_12B_R);
+	 // HAL_ADC_Start_DMA(&hadc2, BUFFER_ADC2, BUFFER_ADC_SIZE);
+	 // HAL_ADC_ConvCpltCallback();
+	 // HAL_Delay(5);
+
+	 // HAL_ADC_Start_DMA(&hadc1, BUFFER_ADC, BUFFER_ADC_SIZE); // start in DMA and we are reading only 1 channel or 1 word
+
+	 // HAL_Delay(5);
+	  }
 
   }
   /* USER CODE END 3 */
