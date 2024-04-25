@@ -44,6 +44,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
+ADC_HandleTypeDef hadc2;
 DMA_HandleTypeDef hdma_adc1;
 
 DAC_HandleTypeDef hdac;
@@ -54,7 +55,9 @@ TIM_HandleTypeDef htim8;
 TIM_HandleTypeDef htim11;
 
 UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart3;
 DMA_HandleTypeDef hdma_usart1_tx;
+DMA_HandleTypeDef hdma_usart3_tx;
 
 /* USER CODE BEGIN PV */
 
@@ -68,23 +71,30 @@ static void MX_DAC_Init(void);
 static void MX_TIM8_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM7_Init(void);
-static void MX_USART1_UART_Init(void);
 static void MX_TIM11_Init(void);
+static void MX_ADC2_Init(void);
+static void MX_USART3_UART_Init(void);
+static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
+void Set_System_Working(int status);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-//uint32_t var;
-
-
-#define BUFFER_ADC_SIZE 600  // 2.5us ADC for 10ms
-//#define PI 3.1415926
+#define BUFFER_ADC_SIZE 100  // 2.5us ADC for 10ms
 #define NUM_SAMPLES 100
 #define WINDOW_SIZE 500
 #define FLAG_POSITION  (1 << 0) // Assuming flag is at bit 0
+#define DAC_MID (4095 / 2)
+#define TRIGER_TIMES 10 //
+
+#define B1_GPIO_PORT GPIOC             // Button Blue
+#define B1_GPIO_PIN  GPIO_PIN_13
+
+#define SYSTEM_WORKING_PIN GPIO_PIN_5  // Trigger out
+#define SYSTEM_WORKING_GPIO_PORT GPIOB
+
 
 
 float32_t sine_val[NUM_SAMPLES];
@@ -93,14 +103,32 @@ uint32_t BUFFER_ADC[BUFFER_ADC_SIZE];
 uint32_t BUFFER_ADC2[BUFFER_ADC_SIZE];
 uint32_t TIMER8_VALUE;
 uint32_t adc_value;
-//float32_t hann_window[WINDOW_SIZE];
 float32_t hanning[WINDOW_SIZE];
 uint32_t after_hanning[WINDOW_SIZE];
-
 uint32_t sine_val_test[NUM_SAMPLES];
 uint32_t sine_val_five_test[500];
-uint32_t flag=0;
+uint8_t flag_100ms=0;
+uint8_t adc_flag=0;
+uint8_t dac_flag=0;
+uint32_t adc1_value[BUFFER_ADC_SIZE];
+uint32_t adc2_value[BUFFER_ADC_SIZE];
+float32_t result[2 * BUFFER_ADC_SIZE - 1];
+float32_t adc1_f[BUFFER_ADC_SIZE];
+float32_t adc2_f[BUFFER_ADC_SIZE];
+uint32_t uarttest[4]={0x12345678,0xaaaaaaaa,0x00000000,0xffffffff};
+uint8_t cnt=0;
 
+uint8_t cnt_t=0; // for test
+
+
+
+void Set_System_Working(int status) {
+  if (status) {
+    HAL_GPIO_WritePin(SYSTEM_WORKING_GPIO_PORT, SYSTEM_WORKING_PIN, GPIO_PIN_SET);
+  } else {
+    HAL_GPIO_WritePin(SYSTEM_WORKING_GPIO_PORT, SYSTEM_WORKING_PIN, GPIO_PIN_RESET);
+  }
+}
 
 void get_sineval()
 {
@@ -108,15 +136,44 @@ void get_sineval()
    {
 	    for (int i=0;i<NUM_SAMPLES;i++)
 	    {
-	    	sine_val[i] = ((sin(i*2*PI/NUM_SAMPLES-PI/2)+1)*(4096/2));
+	    	sine_val[i] = ((sin(i*2*PI/NUM_SAMPLES-1/2*PI)+1)*(4096/2));
 
 	    	sine_val_five[j*100+i]=sine_val[i];
+
 	    	sine_val_five_test[j*100+i]=(uint32_t)(sine_val_five[j*100+i]);
 	    }
 
 
    }
 }
+
+void convertUint32ToFloat32(uint32_t *input, float32_t *output, size_t length)
+{
+    for (size_t i = 0; i < length; i++) {
+        output[i] = (float32_t)input[i];
+    }
+}
+
+void convertFloat32ToUint32(float32_t *input, uint32_t *output, size_t length, float32_t scale) {
+    for (size_t i = 0; i < length; i++) {
+        if (input[i] < 0) {
+            output[i] = 0;  // Clamping negative values to zero
+        } else {
+            float32_t temp = input[i] * scale;
+            output[i] = (uint32_t)temp;
+        }
+    }
+}
+
+/*
+for (int i = 0; i < ARRAY_SIZE; i++) {
+       buffer_float32[i] = (float32_t)i / ARRAY_SIZE;  // Example: normalized float values
+   }
+
+   // Convert float32 to uint32 with scaling
+   convertFloat32ToUint32(buffer_float32, buffer_uint32, ARRAY_SIZE, 4294967295.0f);
+*/
+
 /*
 void get_sineval_test()
 {
@@ -139,11 +196,18 @@ void applyHanningWindow()
     {
         hanning[i] = 0.5 * (1 - cos(2 * PI * i / (WINDOW_SIZE - 1)));
 
-        after_hanning[i]=(uint32_t)(sine_val_five[i]* hanning[i]);
+        after_hanning[i]=(uint32_t)(DAC_MID + (sine_val_five[i] - DAC_MID) * hanning[i]);
     }
 }
 
-/*
+
+void computeCrossCorrelation(float32_t* pSrcA, float32_t* pSrcB, uint32_t srcALength, uint32_t srcBLength, float32_t* pDst)
+{
+    arm_correlate_f32(pSrcA, srcALength, pSrcB, srcBLength, pDst);
+}
+
+
+
 void SendBufferOverUART(uint32_t* buffer, size_t length) {
     for (size_t i = 0; i < length; i++) {
         uint8_t data[4];
@@ -159,21 +223,19 @@ void SendBufferOverUART(uint32_t* buffer, size_t length) {
         HAL_UART_Transmit(&huart1, &data[3], 1, HAL_MAX_DELAY);
     }
 }
-*/
+
+
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
 	if(hadc->Instance == ADC1)
 	{
+        adc_flag = 1;
 		adc_value = BUFFER_ADC[1];
-		//HAL_UART_Transmit_DMA(&huart1, (uint8_t*)BUFFER_ADC, sizeof(BUFFER_ADC_SIZE));
-	    // SendBufferOverUART(BUFFER_ADC, BUFFER_ADC_SIZE);
-	    // HAL_Delay(10);
+
+		HAL_TIM_Base_Stop_IT(&htim8);
+
 	}
-	//htim8.Instance->CNT=0;
-	//adc_value = BUFFER_ADC[1];
-	//time6_value=__HAL_TIM_GET_COUNTER(&htim6);
-	//adc_value = buffer;
 
 }
 /*
@@ -184,27 +246,64 @@ void HAL_ADC_ConvHalfColtCallback(ADC_HandleTypeDef* hadc)
 
 }
 */
-/* TIM6 callback function */
+void EXTI15_10_IRQHandler(void)
+{
+  // Handle EXTI line interrupt for B1
+  HAL_GPIO_EXTI_IRQHandler(B1_GPIO_PIN);
+}
 
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+  if (GPIO_Pin == B1_GPIO_PIN)
+  {
+	// HAL_TIM_Base_Start_IT(&htim11);  // To start Timer6 which is 100ms
+    // Perform action when B1 is pressed
+  }
+}
 
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+void HAL_DMA_ConvCpltCallback(DMA_HandleTypeDef *hdma)
+{
+    if (hdma->Instance == DMA1_Stream5)
+    {
+        // Stop DAC
+    	cnt_t++;
+        HAL_DAC_Stop_DMA(&hdac, DAC_CHANNEL_1);
+        HAL_TIM_Base_Stop_IT(&htim7);
+
+        // Deinitialize DAC and DMA
+        HAL_DAC_DeInit(&hdac);
+        HAL_DMA_DeInit(hdma);
+
+      // Optionally disable clocks if no further DAC activity is expected
+      //  __HAL_RCC_DAC_CLK_DISABLE();
+      //  __HAL_RCC_DMA1_CLK_DISABLE();
+    }
+}
+
+/* TIM11 callback function */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)/* Timer 11 period elapsed */
 {
    if (htim->Instance == TIM11)
    {
-        /* Timer 6 period elapsed */
+	   // Optionally disable the 100ms timer interrupt
+	   __HAL_TIM_DISABLE_IT(htim, TIM_IT_UPDATE);
+
     	//HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5); // To show the status by LED
+
     	// Set the flag
-    	flag = 1; // Set the corresponding bit to 1
-    	//HAL_TIM_Base_Start_IT(&htim7);  // DAC Timer
-      // HAL_TIM_Base_Start_IT(&htim8);  //ADC Timer
+	   flag_100ms = 1; // Set the corresponding bit to 1
+
+    	if(cnt<TRIGER_TIMES)
+    	{
 
 
-    	//HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, after_hanning, 500, DAC_ALIGN_12B_R);
-    	//HAL_Delay(10);
-        HAL_ADC_Start_DMA(&hadc1, BUFFER_ADC, BUFFER_ADC_SIZE); // start in DMA and we are reading only 1 channel or 1 word
-        //HAL_ADC_Start_DMA(&hadc2, BUFFER_ADC2, BUFFER_ADC_SIZE); // start in DMA and we are reading only 1 channel or 1 word
-      //  HAL_ADC_ConvCpltCallback();
-      // HAL_ADC_ConvHalfColtCallback();
+    		HAL_ADC_Start(&hadc1);
+  	      HAL_ADC_Start(&hadc2);
+  	      HAL_ADCEx_MultiModeStart_DMA(&hadc1, BUFFER_ADC,BUFFER_ADC_SIZE );
+
+    	}
+
+        // Re-enable the 100ms timer interrupt
+              __HAL_TIM_ENABLE_IT(htim, TIM_IT_UPDATE);
     	/* Your code here */
    }
 }
@@ -247,17 +346,18 @@ int main(void)
   MX_TIM8_Init();
   MX_ADC1_Init();
   MX_TIM7_Init();
-  MX_USART1_UART_Init();
   MX_TIM11_Init();
+  MX_ADC2_Init();
+  MX_USART3_UART_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-
   get_sineval();  // To get the 5-cycle sine wave
  // get_sineval_test();
   applyHanningWindow() ;
-  HAL_TIM_Base_Start_IT(&htim11);  // To start Timer6 which is 100ms
-  HAL_TIM_Base_Start_IT(&htim7);
-  HAL_TIM_Base_Start_IT(&htim8);  //ADC Timer
 
+
+
+  //HAL_ADCEx_MultiModeStart_DMA(&hadc1, BUFFER_ADC,BUFFER_ADC_SIZE );
  // arm_hanning_f32(hann_window, WINDOW_SIZE);
 
   /* USER CODE END 2 */
@@ -269,24 +369,64 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	//  SendBufferOverUART();
-	 // HAL_Delay(5);
-	  if (flag==1)
+	 //HAL_UART_Transmit_DMA(&huart1,  uarttest8, sizeof(uarttest8));
+	 //SendBufferOverUART(uarttest, 4);
+     // HAL_Delay(100);
+	  if (HAL_GPIO_ReadPin(B1_GPIO_PORT, B1_GPIO_PIN) == GPIO_PIN_RESET)
+	       {  // Assuming active low
+	       // Button is pressed
+	          HAL_Delay(200);  // Debounce delay
+	          if (HAL_GPIO_ReadPin(B1_GPIO_PORT, B1_GPIO_PIN) == GPIO_PIN_RESET)
+	          {
+	           HAL_TIM_Base_Start_IT(&htim11);  // To start Timer6 which is 100ms
+	           Set_System_Working(1); //  output PB5 to high
+	           cnt=0;
+	          }
+	       }
+
+	  if (flag_100ms==1)
 		{
 	      // Flag is set
-	      // Do something...
-	  // Clear the flag
-	  flag = 0; // Clear the corresponding bit to 0
-	  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
-	 // HAL_TIM_Base_Start_IT(&htim7);
-	  HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, after_hanning, 500, DAC_ALIGN_12B_R);
-	 // HAL_ADC_Start_DMA(&hadc2, BUFFER_ADC2, BUFFER_ADC_SIZE);
-	 // HAL_ADC_ConvCpltCallback();
-	 // HAL_Delay(5);
 
-	 // HAL_ADC_Start_DMA(&hadc1, BUFFER_ADC, BUFFER_ADC_SIZE); // start in DMA and we are reading only 1 channel or 1 word
+		  flag_100ms = 0; // Clear the flag
+		  cnt++;
+	      HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
 
-	 // HAL_Delay(5);
+	     // MX_DAC_Init();
+	      HAL_TIM_Base_Start_IT(&htim7);
+	      HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, after_hanning, 500, DAC_ALIGN_12B_R);
+
+	      HAL_TIM_Base_Start_IT(&htim8);  //ADC Timer
+
+	    }
+	  if(cnt<TRIGER_TIMES)
+	  {
+	      if(adc_flag)
+		      {
+			      adc_flag=0;
+			      HAL_UART_Transmit_DMA(&huart1, (uint8_t*)BUFFER_ADC, BUFFER_ADC_SIZE*sizeof(uint32_t));
+			 // HAL_UART_Transmit_DMA(&huart1, (uint8_t*)uarttest, 16);
+
+
+		/*  for (uint16_t i = 0; i < BUFFER_ADC_SIZE; i++)
+		  		{
+		  		adc1_value[i] = BUFFER_ADC[i] & 0x0000ffff;
+		  		adc2_value[i] = (BUFFER_ADC[i]&0xffff0000)>>16;
+		  		adc1_f[i] = (float32_t)(adc1_value[i]);
+		  		adc2_f[i]= (float32_t)(adc2_value[i]);
+		  		}
+
+		  computeCrossCorrelation(adc1_f,adc2_f, BUFFER_ADC_SIZE, BUFFER_ADC_SIZE, result);
+		  //SendBufferOverUART(BUFFER_ADC, BUFFER_ADC_SIZE);
+		   * */
+
+		      }
+	  }
+	  else
+	  {
+		  HAL_TIM_Base_Stop_IT(&htim11);
+		  Set_System_Working(0);
+		 // HAL_UART_DMAPause(&huart1);
 	  }
 
   }
@@ -352,6 +492,7 @@ static void MX_ADC1_Init(void)
 
   /* USER CODE END ADC1_Init 0 */
 
+  ADC_MultiModeTypeDef multimode = {0};
   ADC_ChannelConfTypeDef sConfig = {0};
 
   /* USER CODE BEGIN ADC1_Init 1 */
@@ -377,6 +518,16 @@ static void MX_ADC1_Init(void)
     Error_Handler();
   }
 
+  /** Configure the ADC multi-mode
+  */
+  multimode.Mode = ADC_DUALMODE_REGSIMULT;
+  multimode.DMAAccessMode = ADC_DMAACCESSMODE_2;
+  multimode.TwoSamplingDelay = ADC_TWOSAMPLINGDELAY_5CYCLES;
+  if (HAL_ADCEx_MultiModeConfigChannel(&hadc1, &multimode) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
   sConfig.Channel = ADC_CHANNEL_0;
@@ -389,6 +540,56 @@ static void MX_ADC1_Init(void)
   /* USER CODE BEGIN ADC1_Init 2 */
 
   /* USER CODE END ADC1_Init 2 */
+
+}
+
+/**
+  * @brief ADC2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC2_Init(void)
+{
+
+  /* USER CODE BEGIN ADC2_Init 0 */
+
+  /* USER CODE END ADC2_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC2_Init 1 */
+
+  /* USER CODE END ADC2_Init 1 */
+
+  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+  */
+  hadc2.Instance = ADC2;
+  hadc2.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
+  hadc2.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc2.Init.ScanConvMode = DISABLE;
+  hadc2.Init.ContinuousConvMode = DISABLE;
+  hadc2.Init.DiscontinuousConvMode = DISABLE;
+  hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc2.Init.NbrOfConversion = 1;
+  hadc2.Init.DMAContinuousRequests = DISABLE;
+  hadc2.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  if (HAL_ADC_Init(&hadc2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_1;
+  sConfig.Rank = 1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC2_Init 2 */
+
+  /* USER CODE END ADC2_Init 2 */
 
 }
 
@@ -407,6 +608,8 @@ static void MX_DAC_Init(void)
   DAC_ChannelConfTypeDef sConfig = {0};
 
   /* USER CODE BEGIN DAC_Init 1 */
+  //hdac.State = HAL_DAC_STATE_RESET;
+  //hdac.ErrorCode= 0;
 
   /* USER CODE END DAC_Init 1 */
 
@@ -581,6 +784,39 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
+  * @brief USART3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART3_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART3_Init 0 */
+
+  /* USER CODE END USART3_Init 0 */
+
+  /* USER CODE BEGIN USART3_Init 1 */
+
+  /* USER CODE END USART3_Init 1 */
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 115200;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART3_Init 2 */
+
+  /* USER CODE END USART3_Init 2 */
+
+}
+
+/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -591,6 +827,9 @@ static void MX_DMA_Init(void)
   __HAL_RCC_DMA2_CLK_ENABLE();
 
   /* DMA interrupt init */
+  /* DMA1_Stream3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream3_IRQn);
   /* DMA1_Stream5_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
@@ -623,6 +862,9 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
 
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(Triger_out_GPIO_Port, Triger_out_Pin, GPIO_PIN_RESET);
+
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
@@ -643,6 +885,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : Triger_out_Pin */
+  GPIO_InitStruct.Pin = Triger_out_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(Triger_out_GPIO_Port, &GPIO_InitStruct);
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
 /* USER CODE END MX_GPIO_Init_2 */
